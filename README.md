@@ -42,5 +42,5 @@ python3 -m src.VR537643
 
 ## References
 
-[OpenCV](https://docs.opencv.org/4.x/d6/d00/tutorial_py_root.html)
-[YouTube](https://www.youtube.com/playlist?list=PLSK7NtBWwmpQwSUi53XUK5o6-b9H3ABrO)
+- [OpenCV](https://docs.opencv.org/4.x/d6/d00/tutorial_py_root.html)
+- [YouTube](https://www.youtube.com/playlist?list=PLSK7NtBWwmpQwSUi53XUK5o6-b9H3ABrO)
