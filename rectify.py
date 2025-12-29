@@ -29,7 +29,7 @@ def order_points(pts):
 
 def main():
     # Input Handling (as per exercise description)
-    image_path = "./assets/sudoku/sudoku.jpg"
+    image_path = "./assets/rectify/sudoku.jpg"
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
 

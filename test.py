@@ -1,158 +1,134 @@
-import cv2
+import cv2 as cv
 import numpy as np
 import sys
 import os
 
 
-def order_points(pts):
+def stitch_two_images(img_left, img_right):
     """
-    Helper function to order coordinates:
-    top-left, top-right, bottom-right, bottom-left.
-    This is crucial for mapping the corners correctly.
+    Stitches two images together by warping img_right to match img_left's perspective.
     """
-    rect = np.zeros((4, 2), dtype="float32")
+    # 1. Convert to grayscale for feature detection
+    gray_left = cv.cvtColor(img_left, cv.COLOR_BGR2GRAY)
+    gray_right = cv.cvtColor(img_right, cv.COLOR_BGR2GRAY)
 
-    # The top-left point will have the smallest sum, whereas
-    # the bottom-right point will have the largest sum
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
+    # 2. Feature Detection (SIFT)
+    # SIFT is robust to scale and rotation changes
+    sift = cv.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(
+        gray_left, None
+    )  # Keypoints & Descriptors for Left
+    kp2, des2 = sift.detectAndCompute(
+        gray_right, None
+    )  # Keypoints & Descriptors for Right
 
-    # The top-right point will have the smallest difference,
-    # whereas the bottom-left will have the largest difference
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
+    # 3. Feature Matching
+    # We use FLANN or BFMatcher. KNN (k=2) allows us to use the Ratio Test.
+    bf = cv.BFMatcher()
+    matches = bf.knnMatch(des1, des2, k=2)
 
-    return rect
+    # 4. Filter Matches (Lowe's Ratio Test)
+    # Only keep matches where the best match is significantly better than the second best.
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good_matches.append(m)
+
+    # We need at least 4 matches to calculate a Homography (usually we want many more)
+    if len(good_matches) < 4:
+        print("Error: Not enough matches found between images.")
+        return img_left
+
+    # 5. Extract coordinates of the matching points
+    # pts1 = points in left image, pts2 = points in right image
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+    # 6. Compute Homography (RANSAC)
+    # RANSAC is critical here: it finds the matrix that fits the majority of points
+    # and ignores the "outliers" (wrong matches).
+    # We map pts2 (right) -> pts1 (left)
+    H, mask = cv.findHomography(pts2, pts1, cv.RANSAC, 5.0)
+
+    # 7. Warping
+    # We need a canvas large enough to hold both images.
+    # For simplicity, we assume horizontal stitching (Right image added to Left).
+    height_l, width_l = img_left.shape[:2]
+    height_r, width_r = img_right.shape[:2]
+
+    # The new width is roughly the sum of both (minus overlap), but we'll use sum to be safe.
+    canvas_width = width_l + width_r
+    canvas_height = max(height_l, height_r)
+
+    # Warp the right image onto the new canvas using the Homography
+    warped_right = cv.warpPerspective(img_right, H, (canvas_width, canvas_height))
+
+    # 8. Blending (Linear/Overlay)
+    # To avoid a sharp seam, we can blend.
+    # A simple approach for this exercise:
+    # Create a mask of where the warped image is, and overwrite with the left image.
+
+    # Place the left image on the canvas
+    result = warped_right.copy()
+
+    # Simple Overlay: Just overwrite the left part.
+    # Note: For "seamless" linear blending, you would calculate alpha masks here.
+    # For this exercise, simple overlay + RANSAC usually satisfies the "alignment" requirement.
+    result[0:height_l, 0:width_l] = img_left
+
+    # Optional: Trimming the black border on the right
+    # (Find the last non-black column to crop the result)
+    gray_result = cv.cvtColor(result, cv.COLOR_BGR2GRAY)
+    _, thresh = cv.threshold(gray_result, 1, 255, cv.THRESH_BINARY)
+    contours, _ = cv.findContours(thresh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+    if contours:
+        x, y, w, h = cv.boundingRect(contours[0])  # Get bounding box of valid pixels
+        result = result[0:h, 0 : x + w]  # Crop
+
+    return result
 
 
 def main():
-    # Input Handling (as per exercise description)
-    image_path = "sudoku.jpg"
-    if len(sys.argv) > 1:
-        image_path = sys.argv[1]
+    # Load command line arguments
+    # Usage: python stitch.py img1.jpg img2.jpg ...
+    image_paths = sys.argv[1:]
 
-    if not os.path.exists(image_path):
-        print(f"Error: Could not find image '{image_path}'")
+    # Handle optional default values as per prompt instructions
+    if len(image_paths) == 0:
+        print("No images provided. Trying default 'img0.jpg' and 'img1.jpg'...")
+        image_paths = ["./assets/stitching/img0.JPG", "./assets/stitching/img1.JPG"]
+
+    # Load all images
+    images = []
+    for path in image_paths:
+        img = cv.imread(path)
+        if img is not None:
+            images.append(img)
+        else:
+            print(f"Warning: Could not load {path}")
+
+    if len(images) < 2:
+        print("Need at least 2 images to stitch.")
         return
 
-    # Load image and keep a copy for display
-    image = cv2.imread(image_path)
-    original = image.copy()
+    print(f"Loaded {len(images)} images. Starting stitching...")
 
-    ### Feature Detection ###
-    # We use Canny edge detection + Contours to find the grid
+    # Iterative Stitching
+    # We take the first image as the base panorama, and stitch the next ones to it.
+    panorama = images[0]
 
-    # Algorithms like Canny Edge Detection operate on intensity changes (light to dark),
-    # so color information is treated as unnecessary noise.
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    for i in range(1, len(images)):
+        print(f"Stitching image {i+1}/{len(images)}...")
+        panorama = stitch_two_images(panorama, images[i])
 
-    # Technically: This smooths the image to remove "high-frequency noise".
-    # If you don't blur, a single speck of dust or digital grain could be mistaken for an edge.
-    #
-    # Mathematically: This is a Convolution operation.
-    # A small matrix (kernel) slides over the image.
-    # The kernel values follow a 2D Gaussian distribution (a bell curve).
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    # Visualization
+    cv.imshow("Final Panorama", panorama)
+    cv.waitKey(0)
+    cv.destroyAllWindows()
 
-    # Technically: The Canny algorithm is a multi-stage edge detector.
-    # It finds pixels where the intensity changes most drastically (gradients).
-    edged = cv2.Canny(blur, 75, 200)
-
-    # Find contours
-    # Technically: This function analyzes the binary image (black and white edges) to find connected curves.
-    # It walks along the boundary of white pixels to separate "objects" from the black background
-    #
-    # Mathematically (Topological Analysis): The algorithm (based on Suzuki & Abe, 1985) scans the image rows.
-    # When it transitions from black (0) to white (1), it marks a "border".
-    # It then follows this border until it returns to the start point.
-    # - cv2.RETR_EXTERNAL: This flag tells the algorithm to only retrieve the outermost contours.
-    # It ignores contours inside other contours (e.g., the numbers inside the Sudoku grid).
-    # Mathematically, it only keeps the "parents" in the hierarchy tree of nested shapes.
-    #
-    # - cv2.CHAIN_APPROX_SIMPLE: This compresses the contour data.
-    # A vertical line of 100 pixels normally requires 100 coordinate pairs (x, y).
-    # This flag reduces it to just the endpoints (2 coordinates), discarding the redundant points in between.
-    # This saves memory and speeds up later calculations.
-    cnts, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Technically: This sorts the list of detected shapes from largest to smallest and keeps only the top 5
-    # Mathematically: It calculates the Green's Theorem area for a polygon
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)[:5]  # Sort by largest area
-
-    puzzle_contour = None
-
-    # Loop over the contours to find the 4-sided polygon (the sudoku grid)
-    for c in cnts:
-        # Technically: This calculates the total length of the contour boundary
-        #
-        # Mathematically: It sums the Euclidean distances between consecutive points in the contour.
-        # If the contour is closed (the True flag), it includes the distance from the last point back to the first
-        peri = cv2.arcLength(c, True)
-
-        # Approximate the contour to a polygon
-        # Technically: This simplifies a jagged, noisy contour into a cleaner geometric shape with fewer vertices.
-        # It asks: "Can I represent this complex shape with a simpler polygon that doesn't deviate more than ϵ from the original?"
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-
-        # If our approximated contour has four points, we can assume we found the screen
-        if len(approx) == 4:
-            puzzle_contour = approx
-            break
-
-    if puzzle_contour is None:
-        print("Could not find the Sudoku grid corners.")
-        return
-
-    # Draw the found corners on the original image for visualization
-    cv2.drawContours(image, [puzzle_contour], -1, (0, 255, 0), 2)
-
-    # Prepare the Source Points (from the image)
-    # We reshape to (4, 2) and order them consistently
-    src_pts = order_points(puzzle_contour.reshape(4, 2))
-
-    ### Define Destination (Synthetic) Plane ###
-
-    # Let's define a target width and height for our new square image
-    # (You can calculate max width/height dynamically, but hardcoding a square is fine for Sudoku)
-    width = 400
-    height = 400
-
-    # These are the destination points: Top-Left, Top-Right, Bottom-Right, Bottom-Left
-    dst_pts = np.float32(
-        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]]
-    )
-
-    ### Homography Computation ###
-
-    # This maps the source points (tilted) to the destination points (flat)
-    # Technically: This function calculates the 3×3 transformation matrix
-    # needed to map the 4 corners of the detected polygon to the 4 corners of the flattened square.
-    #
-    # Mathematically (Solving a Linear System): A homography matrix has 9 elements,
-    # but because it is scale-invariant (multiplying the whole matrix by 5 doesn't change the transformation),
-    # we fix the last element (h33​) to 1. This leaves 8 unknowns (degrees of freedom).
-    # To solve for 8 unknowns, we need 8 equations.
-    # Each pair of matching points (x,y)→(x′,y′) provides exactly 2 equations.
-    H = cv2.getPerspectiveTransform(src_pts, dst_pts)
-
-    ### Warping ###
-
-    # Technically: This function takes the original image and the matrix H and renders the new image
-    # 
-    # Mathematically (Backward Mapping & Interpolation):
-    # You might think the computer takes a pixel from the Source and moves it to the Destination.
-    # It actually does the opposite. This is called "Inverse Mapping".
-    warped = cv2.warpPerspective(original, H, (width, height))
-
-    # Show results
-    cv2.imshow("Original with Corners", image)
-    cv2.imshow("Rectified (Warped)", warped)
-
-    print("Press any key to close...")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    # Save the result
+    cv.imwrite("./assets/stitching/panorama_result.jpg", panorama)
+    print("Result saved as panorama_result.jpg")
 
 
 if __name__ == "__main__":
