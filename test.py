@@ -2,237 +2,255 @@ import cv2 as cv
 import numpy as np
 import sys
 
-LOWE_RATION = 0.75
-THRESHOLD_GOOD_MATCHES = 50
 
-
-def detect_and_match(img1, img2):
+# --- Helper: Order Points ---
+def order_points(pts):
     """
-    Returns the number of good matches and the homography matrix.
-    We match img2 -> img1.
+    Sorts 4 points in standard order: TL, TR, BR, BL.
+    Crucial for correct Homography mapping.
     """
-    gray1 = cv.cvtColor(img1, cv.COLOR_BGR2GRAY)
-    gray2 = cv.cvtColor(img2, cv.COLOR_BGR2GRAY)
+    rect = np.zeros((4, 2), dtype="float32")
 
-    detector = cv.BRISK_create()
-    kp1, des1 = detector.detectAndCompute(gray1, None)
-    kp2, des2 = detector.detectAndCompute(gray2, None)
+    # TL: min(sum), BR: max(sum)
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
 
-    if des1 is None or des2 is None:
-        return 0, None, None
+    # TR: min(diff), BL: max(diff)
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
 
-    matcher = cv.BFMatcher(cv.NORM_HAMMING)
-    matches = matcher.knnMatch(des1, des2, k=2)
-
-    good = []
-    for m, n in matches:
-        if m.distance < LOWE_RATION * n.distance:
-            good.append(m)
-
-    if len(good) < 4:
-        return 0, None, None
-
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-
-    # Calculate Homography
-    H, mask = cv.findHomography(pts2, pts1, cv.RANSAC, 5.0)
-
-    # Count inliers (how many points fit the homography)
-    matches_count = np.sum(mask) if mask is not None else 0
-    return matches_count, H, pts2
+    return rect
 
 
-def stitch_images_blend(base_img, next_img, H):
+# --- Step 1: Load Images ---
+def load_images(img_path, logo_path):
+    """Loads the pitch and logo (preserving alpha if present)."""
+    img = cv.imread(img_path)
+    # IMREAD_UNCHANGED is vital for loading PNG transparency (Alpha channel)
+    logo = cv.imread(logo_path, cv.IMREAD_UNCHANGED)
+
+    if img is None:
+        print(f"Error: Could not load pitch image from {img_path}")
+        sys.exit(1)
+    if logo is None:
+        print(f"Error: Could not load logo image from {logo_path}")
+        sys.exit(1)
+
+    return img, logo
+
+
+# --- Step 2: Extract Features (Center Circle) ---
+def extract_circle_features(image):
     """
-    Stitches next_img onto base_img with seamless Distance Transform blending.
+    Detects the center circle and returns the 4 corners of its bounding box.
+    Returns None if detection fails.
     """
-    # --- 1. Canvas Calculation (Same as before) ---
-    h1, w1 = base_img.shape[:2]
-    h2, w2 = next_img.shape[:2]
+    # Convert to HLS to easily find white lines (L = Lightness)
+    hls = cv.cvtColor(image, cv.COLOR_BGR2HLS)
+    L = hls[:, :, 1]
 
-    # Get corners of the next image to calculate the new bounding box
-    corners_next = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
-    warped_corners = cv.perspectiveTransform(corners_next, H)
+    # Threshold for white lines (assuming grass is darker)
+    _, mask = cv.threshold(L, 160, 255, cv.THRESH_BINARY)
 
-    # Combine with base image corners
-    all_pts = np.concatenate(
-        ([[0, 0], [0, h1], [w1, h1], [w1, 0]], warped_corners.reshape(-1, 2)), axis=0
+    # Morphological operations to close gaps in the lines
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, (5, 5))
+    mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel)
+
+    # Find contours
+    cnts, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
+
+    best_box = None
+
+    for c in cnts:
+        # Filter noise
+        if cv.contourArea(c) < 500:
+            continue
+        if len(c) < 5:
+            continue  # Need 5 points to fit ellipse
+
+        # Fit Ellipse
+        try:
+            ellipse = cv.fitEllipse(c)
+            # Heuristic: The center circle is usually somewhat round, not a flat line.
+            (center, axes, angle) = ellipse
+            major_axis, minor_axis = max(axes), min(axes)
+
+            # If the aspect ratio is too extreme, it's likely a side line, not the circle
+            if minor_axis / major_axis > 0.1:
+                # Get the 4 corners of the bounding rect of this ellipse
+                best_box = cv.boxPoints(ellipse)
+                # We assume the largest valid ellipse found is the center circle
+                # (In a real app, you might want more robust filtering)
+                break
+        except:
+            continue
+
+    if best_box is not None:
+        return order_points(best_box)
+    else:
+        return None
+
+
+# --- Step 3: Estimate Homography ---
+def estimate_homography(src_pts, side_length=400):
+    """
+    Calculates H matrix mapping source points to a 'side_length' square.
+    """
+    # Destination points: A perfect square
+    dst_pts = np.float32(
+        [
+            [0, 0],
+            [side_length - 1, 0],
+            [side_length - 1, side_length - 1],
+            [0, side_length - 1],
+        ]
     )
 
-    # Find min/max to determine canvas size
-    [xmin, ymin] = np.int32(all_pts.min(axis=0).ravel() - 0.5)
-    [xmax, ymax] = np.int32(all_pts.max(axis=0).ravel() + 0.5)
-
-    # Translation matrix to shift everything to positive coordinates
-    t = [-xmin, -ymin]
-    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])
-
-    # Warp the next image (Img B) onto the large canvas
-    warped_next = cv.warpPerspective(next_img, Ht.dot(H), (xmax - xmin, ymax - ymin))
-
-    # Place the base image (Img A) onto the SAME size canvas
-    canvas_base = np.zeros_like(warped_next)
-    canvas_base[t[1] : h1 + t[1], t[0] : w1 + t[0]] = base_img
-
-    # --- 2. Blending Logic (New) ---
-
-    # A. Create Masks: Where do we have actual pixels vs black background?
-    # We create a binary mask (1 for valid pixel, 0 for empty black)
-    mask_base = cv.cvtColor(canvas_base, cv.COLOR_BGR2GRAY) > 0
-    mask_next = cv.cvtColor(warped_next, cv.COLOR_BGR2GRAY) > 0
-
-    # B. Distance Transform
-    # Calculate distance from the nearest black edge for every pixel.
-    # Pixels in the center of the image get high values; pixels at the seam get low values.
-    dist_base = cv.distanceTransform(mask_base.astype(np.uint8), cv.DIST_L2, 5)
-    dist_next = cv.distanceTransform(mask_next.astype(np.uint8), cv.DIST_L2, 5)
-
-    # C. Calculate Weights
-    # In the overlap region, we want: Final = (ImgA * DistA + ImbB * DistB) / (DistA + DistB)
-    # This automatically creates a linear gradient from one image to the other.
-
-    # Add a tiny value (1e-6) to avoid division by zero errors in the black background
-    total_dist = dist_base + dist_next + 1e-6
-
-    weight_base = dist_base / total_dist
-    weight_next = dist_next / total_dist
-
-    # D. Apply Weights
-    # We blend each channel (B, G, R) separately
-    result = np.zeros_like(warped_next, dtype=np.float32)
-
-    # Expand dimensions of weights to match image shape (H, W, 1) so we can multiply
-    weight_base_3ch = np.dstack([weight_base] * 3)
-    weight_next_3ch = np.dstack([weight_next] * 3)
-
-    result = (canvas_base.astype(float) * weight_base_3ch) + (
-        warped_next.astype(float) * weight_next_3ch
-    )
-
-    return result.astype(np.uint8)
+    H = cv.getPerspectiveTransform(src_pts, dst_pts)
+    return H, (side_length, side_length)
 
 
-def stitch_images(base_img, next_img, H, side="right"):
+# --- Step 4: Warp to Frontal Plane ---
+def warp_to_frontal(image, H, size):
+    """Warps the image to the top-down view."""
+    return cv.warpPerspective(image, H, size)
+
+
+# --- Step 5: Blend Logo (Linear Blending) ---
+def blend_logo_on_circle(frontal_image, logo):
     """
-    Stitches next_img onto base_img using Homography H.
-    Handles canvas expansion for both Left and Right sides.
+    Resizes and blends the logo into the center of the frontal image.
+    Handles both PNG (Alpha) and JPG (No Alpha).
     """
-    h1, w1 = base_img.shape[:2]
-    h2, w2 = next_img.shape[:2]
+    bg_h, bg_w = frontal_image.shape[:2]
 
-    # Get the corners of the next image (to see where it lands)
-    corners_next = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
-    warped_corners = cv.perspectiveTransform(corners_next, H)
+    # Resize logo to fit inside (e.g., 60% of the circle width)
+    scale_factor = 0.6
+    target_w = int(bg_w * scale_factor)
+    aspect_ratio = logo.shape[1] / logo.shape[0]
+    target_h = int(target_w / aspect_ratio)
 
-    # Combine corners to find new canvas size
-    # (0,0) is top-left of base_img. Warped corners might be negative (left side).
-    all_pts = np.concatenate(
-        ([[0, 0], [0, h1], [w1, h1], [w1, 0]], warped_corners.reshape(-1, 2)), axis=0
-    )
+    logo_resized = cv.resize(logo, (target_w, target_h))
 
-    [xmin, ymin] = np.int32(all_pts.min(axis=0).ravel() - 0.5)
-    [xmax, ymax] = np.int32(all_pts.max(axis=0).ravel() + 0.5)
+    # Calculate center offset
+    x_off = (bg_w - target_w) // 2
+    y_off = (bg_h - target_h) // 2
 
-    # Translation matrix to shift everything to positive coordinates
-    t = [-xmin, -ymin]
-    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])
+    # Region of Interest (ROI)
+    roi = frontal_image[y_off : y_off + target_h, x_off : x_off + target_w]
 
-    # Warping
-    # Note: We warp next_img using (Ht dot H) because we need to apply the shift AND the homography
-    warped_next = cv.warpPerspective(next_img, Ht.dot(H), (xmax - xmin, ymax - ymin))
+    # -- Blending Logic --
+    if logo.shape[2] == 4:
+        # PNG with Transparency: Use Alpha Channel
+        alpha = logo_resized[:, :, 3] / 255.0
+        alpha_inv = 1.0 - alpha
 
-    # Create the final canvas
-    # Place base_img at its new offset position
-    output_img = warped_next.copy()
-    output_img[t[1] : h1 + t[1], t[0] : w1 + t[0]] = base_img
+        # Expand dims for broadcasting: (H, W) -> (H, W, 3)
+        alpha = np.dstack([alpha] * 3)
+        alpha_inv = np.dstack([alpha_inv] * 3)
 
-    return output_img
+        logo_rgb = logo_resized[:, :, :3]
+
+        # Formula: Final = (Logo * Alpha) + (Background * (1-Alpha))
+        blended = (logo_rgb * alpha) + (roi * alpha_inv)
+        frontal_image[y_off : y_off + target_h, x_off : x_off + target_w] = (
+            blended.astype(np.uint8)
+        )
+
+    else:
+        # JPG/No Transparency: Linear Weighted Add
+        # Formula: Final = (Logo * 0.7) + (Background * 0.3)
+        blended = cv.addWeighted(roi, 0.3, logo_resized, 0.7, 0)
+        frontal_image[y_off : y_off + target_h, x_off : x_off + target_w] = blended
+
+    return frontal_image
 
 
+# --- Step 6: Inverse Homography & Composition ---
+def warp_back_and_composite(original_image, frontal_image, H):
+    """
+    Warps the modified frontal image back and merges it seamlessly
+    onto the original background.
+    """
+    h_orig, w_orig = original_image.shape[:2]
+
+    # 1. Invert Homography
+    H_inv = np.linalg.inv(H)
+
+    # 2. Warp Back
+    # This creates a black image with ONLY the modified circle area tilted correctly
+    warped_back = cv.warpPerspective(frontal_image, H_inv, (w_orig, h_orig))
+
+    # 3. Create Mask
+    # We need to know which pixels in 'warped_back' are valid data vs black background.
+    gray = cv.cvtColor(warped_back, cv.COLOR_BGR2GRAY)
+    _, mask = cv.threshold(gray, 1, 255, cv.THRESH_BINARY)
+
+    # 4. Composite
+    # Area A: The Original Image where the mask is BLACK (Background)
+    bg = cv.bitwise_and(original_image, original_image, mask=cv.bitwise_not(mask))
+
+    # Area B: The Warped Image where the mask is WHITE (Foreground/Logo)
+    fg = cv.bitwise_and(warped_back, warped_back, mask=mask)
+
+    # Final = Area A + Area B
+    result = cv.add(bg, fg)
+
+    return result
+
+
+# --- Step 7: Main Execution ---
 def main():
-    # 1. Load Images
-    image_paths = sys.argv[1:]
-    if not image_paths:
-        print("Usage: python stitch.py img1.jpg img2.jpg ...")
-        image_paths = ["./assets/stitch/img1.JPG", "./assets/stitch/img0.JPG"]
+    # 1. Load
+    img_path = "./pitch.jpg"
+    logo_path = "./logo_transparent.png"
+    # logo_path = "./logo2.jpg"
 
-    images = []
-    for path in image_paths:
-        img = cv.imread(path)
-        if img is not None:
-            images.append(img)
+    # Handle CLI args
+    if len(sys.argv) > 1:
+        img_path = sys.argv[1]
+    if len(sys.argv) > 2:
+        logo_path = sys.argv[2]
 
-    if len(images) < 2:
-        print("Need at least 2 images.")
+    print(f"Loading {img_path} and {logo_path}...")
+    original_img, logo_img = load_images(img_path, logo_path)
+
+    # 2. Extract Features
+    print("Detecting circle features...")
+    src_pts = extract_circle_features(original_img)
+
+    if src_pts is None:
+        print("Failed to detect center circle. Please check image lighting/contrast.")
         return
 
-    print(f"Loaded {len(images)} images. Analyzing order...")
+    # Visual debug of detection (Optional)
+    debug = original_img.copy()
+    cv.drawContours(debug, [np.int32(src_pts)], -1, (0, 0, 255), 2)
+    cv.imshow("Debug: Detected Corners", cv.resize(debug, None, fx=0.50, fy=0.50))
 
-    # 2. Initialization
-    # We start with the first image as the 'center' and try to attach others to it.
-    panorama = images.pop(0)
+    # 3. Estimate Homography
+    print("Computing Homography...")
+    H, frontal_size = estimate_homography(src_pts, side_length=400)
 
-    # 3. Iterative Stitching
-    # We keep looping through the remaining list until it's empty or we can't find matches
-    while images:
-        best_match_idx = -1
-        best_match_H = None
-        best_match_score = 0
-        best_side = "none"  # 'left' or 'right'
+    # 4. Warp Forward
+    print("Warping to frontal plane...")
+    frontal_img = warp_to_frontal(original_img, H, frontal_size)
 
-        # Check every remaining image against the current panorama
-        for i, candidate in enumerate(images):
+    # 5. Blend Logo
+    print("Blending logo...")
+    frontal_blended = blend_logo_on_circle(frontal_img, logo_img)
 
-            # --- Check RIGHT side ---
-            # Try matching candidate (img2) -> panorama (img1)
-            # If H maps candidate to fit inside panorama, it overlaps.
-            # But we want to know relative position.
-            # Usually, we check translation in H.
+    # 6. Inverse Warp & Composite
+    print("Warping back to original view...")
+    final_result = warp_back_and_composite(original_img, frontal_blended, H)
 
-            count, H, _ = detect_and_match(panorama, candidate)
+    # 7. Visualize
+    cv.imshow("1. Frontal View (Edited)", frontal_blended)
+    cv.imshow("2. Final Result", cv.resize(final_result, None, fx=0.50, fy=0.50))
 
-            if count > THRESHOLD_GOOD_MATCHES:  # Threshold for a "good" match
-                # Check translation component of H (H[0, 2])
-                # If H[0,2] > 0, candidate is to the left (shifted right to match center)
-                # If H[0,2] < 0, candidate is to the right (shifted left to match center)
-                # Wait... homography is tricky.
-                # Let's verify by checking where the center of candidate lands.
-                h_c, w_c = candidate.shape[:2]
-                center_pt = np.array([[[w_c / 2, h_c / 2]]], dtype=np.float32)
-                warped_center = cv.perspectiveTransform(center_pt, H)
-
-                # Center of panorama
-                h_p, w_p = panorama.shape[:2]
-
-                # If warped center x < 0, it belongs on the LEFT.
-                # If warped center x > width, it belongs on the RIGHT.
-                center_x = warped_center[0][0][0]
-
-                side = "right" if center_x > w_p else "left"  # Simplified heuristic
-
-                if count > best_match_score:
-                    best_match_score = count
-                    best_match_idx = i
-                    best_match_H = H
-                    best_side = side
-
-        # 4. Apply Stitch if match found
-        if best_match_idx != -1:
-            print(f"Stitching image {best_match_idx} to the {best_side}...")
-            next_img = images.pop(best_match_idx)
-            # panorama = stitch_images(panorama, next_img, best_match_H, best_side)
-            panorama = stitch_images_blend(panorama, next_img, best_match_H)
-        else:
-            print("Warning: Could not match remaining images.")
-            break
-
-    # Save the result
-    cv.imwrite("./assets/stitch/panorama_result.jpg", panorama)
-    print("Result saved as panorama_result.jpg")
-
-    # Show the result
-    cv.imshow("Result", cv.resize(panorama, None, fx=0.20, fy=0.20))
+    print("Press any key to exit.")
     cv.waitKey(0)
     cv.destroyAllWindows()
 
