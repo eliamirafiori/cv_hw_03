@@ -1,134 +1,169 @@
 import cv2 as cv
 import numpy as np
 import sys
-import os
+
+LOWE_RATION = 0.75
+THRESHOLD_GOOD_MATCHES = 50
 
 
-def stitch_two_images(img_left, img_right):
+def detect_and_match(img1, img2):
     """
-    Stitches two images together by warping img_right to match img_left's perspective.
+    Returns the number of good matches and the homography matrix.
+    We match img2 -> img1.
     """
-    # 1. Convert to grayscale for feature detection
-    gray_left = cv.cvtColor(img_left, cv.COLOR_BGR2GRAY)
-    gray_right = cv.cvtColor(img_right, cv.COLOR_BGR2GRAY)
+    gray1 = cv.cvtColor(img1, cv.COLOR_BGR2GRAY)
+    gray2 = cv.cvtColor(img2, cv.COLOR_BGR2GRAY)
 
-    # 2. Feature Detection (SIFT)
-    # SIFT is robust to scale and rotation changes
-    sift = cv.SIFT_create()
-    kp1, des1 = sift.detectAndCompute(
-        gray_left, None
-    )  # Keypoints & Descriptors for Left
-    kp2, des2 = sift.detectAndCompute(
-        gray_right, None
-    )  # Keypoints & Descriptors for Right
+    detector = cv.BRISK_create()
+    kp1, des1 = detector.detectAndCompute(gray1, None)
+    kp2, des2 = detector.detectAndCompute(gray2, None)
 
-    # 3. Feature Matching
-    # We use FLANN or BFMatcher. KNN (k=2) allows us to use the Ratio Test.
-    bf = cv.BFMatcher()
-    matches = bf.knnMatch(des1, des2, k=2)
+    if des1 is None or des2 is None:
+        return 0, None, None
 
-    # 4. Filter Matches (Lowe's Ratio Test)
-    # Only keep matches where the best match is significantly better than the second best.
-    good_matches = []
+    matcher = cv.BFMatcher(cv.NORM_HAMMING)
+    matches = matcher.knnMatch(des1, des2, k=2)
+
+    good = []
     for m, n in matches:
-        if m.distance < 0.75 * n.distance:
-            good_matches.append(m)
+        if m.distance < LOWE_RATION * n.distance:
+            good.append(m)
 
-    # We need at least 4 matches to calculate a Homography (usually we want many more)
-    if len(good_matches) < 4:
-        print("Error: Not enough matches found between images.")
-        return img_left
+    if len(good) < 4:
+        return 0, None, None
 
-    # 5. Extract coordinates of the matching points
-    # pts1 = points in left image, pts2 = points in right image
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
 
-    # 6. Compute Homography (RANSAC)
-    # RANSAC is critical here: it finds the matrix that fits the majority of points
-    # and ignores the "outliers" (wrong matches).
-    # We map pts2 (right) -> pts1 (left)
+    # Calculate Homography
     H, mask = cv.findHomography(pts2, pts1, cv.RANSAC, 5.0)
 
-    # 7. Warping
-    # We need a canvas large enough to hold both images.
-    # For simplicity, we assume horizontal stitching (Right image added to Left).
-    height_l, width_l = img_left.shape[:2]
-    height_r, width_r = img_right.shape[:2]
+    # Count inliers (how many points fit the homography)
+    matches_count = np.sum(mask) if mask is not None else 0
+    return matches_count, H, pts2
 
-    # The new width is roughly the sum of both (minus overlap), but we'll use sum to be safe.
-    canvas_width = width_l + width_r
-    canvas_height = max(height_l, height_r)
 
-    # Warp the right image onto the new canvas using the Homography
-    warped_right = cv.warpPerspective(img_right, H, (canvas_width, canvas_height))
+def stitch_images(base_img, next_img, H, side="right"):
+    """
+    Stitches next_img onto base_img using Homography H.
+    Handles canvas expansion for both Left and Right sides.
+    """
+    h1, w1 = base_img.shape[:2]
+    h2, w2 = next_img.shape[:2]
 
-    # 8. Blending (Linear/Overlay)
-    # To avoid a sharp seam, we can blend.
-    # A simple approach for this exercise:
-    # Create a mask of where the warped image is, and overwrite with the left image.
+    # Get the corners of the next image (to see where it lands)
+    corners_next = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
+    warped_corners = cv.perspectiveTransform(corners_next, H)
 
-    # Place the left image on the canvas
-    result = warped_right.copy()
+    # Combine corners to find new canvas size
+    # (0,0) is top-left of base_img. Warped corners might be negative (left side).
+    all_pts = np.concatenate(
+        ([[0, 0], [0, h1], [w1, h1], [w1, 0]], warped_corners.reshape(-1, 2)), axis=0
+    )
 
-    # Simple Overlay: Just overwrite the left part.
-    # Note: For "seamless" linear blending, you would calculate alpha masks here.
-    # For this exercise, simple overlay + RANSAC usually satisfies the "alignment" requirement.
-    result[0:height_l, 0:width_l] = img_left
+    [xmin, ymin] = np.int32(all_pts.min(axis=0).ravel() - 0.5)
+    [xmax, ymax] = np.int32(all_pts.max(axis=0).ravel() + 0.5)
 
-    # Optional: Trimming the black border on the right
-    # (Find the last non-black column to crop the result)
-    gray_result = cv.cvtColor(result, cv.COLOR_BGR2GRAY)
-    _, thresh = cv.threshold(gray_result, 1, 255, cv.THRESH_BINARY)
-    contours, _ = cv.findContours(thresh, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
-    if contours:
-        x, y, w, h = cv.boundingRect(contours[0])  # Get bounding box of valid pixels
-        result = result[0:h, 0 : x + w]  # Crop
+    # Translation matrix to shift everything to positive coordinates
+    t = [-xmin, -ymin]
+    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])
 
-    return result
+    # Warping
+    # Note: We warp next_img using (Ht dot H) because we need to apply the shift AND the homography
+    warped_next = cv.warpPerspective(next_img, Ht.dot(H), (xmax - xmin, ymax - ymin))
+
+    # Create the final canvas
+    # Place base_img at its new offset position
+    output_img = warped_next.copy()
+    output_img[t[1] : h1 + t[1], t[0] : w1 + t[0]] = base_img
+
+    return output_img
 
 
 def main():
-    # Load command line arguments
-    # Usage: python stitch.py img1.jpg img2.jpg ...
+    # 1. Load Images
     image_paths = sys.argv[1:]
+    if not image_paths:
+        print("Usage: python stitch.py img1.jpg img2.jpg ...")
+        image_paths = ["./assets/stitch/img1.JPG", "./assets/stitch/img0.JPG"]
 
-    # Handle optional default values as per prompt instructions
-    if len(image_paths) == 0:
-        print("No images provided. Trying default 'img0.jpg' and 'img1.jpg'...")
-        image_paths = ["./assets/stitching/img0.JPG", "./assets/stitching/img1.JPG"]
-
-    # Load all images
     images = []
     for path in image_paths:
         img = cv.imread(path)
         if img is not None:
             images.append(img)
-        else:
-            print(f"Warning: Could not load {path}")
 
     if len(images) < 2:
-        print("Need at least 2 images to stitch.")
+        print("Need at least 2 images.")
         return
 
-    print(f"Loaded {len(images)} images. Starting stitching...")
+    print(f"Loaded {len(images)} images. Analyzing order...")
 
-    # Iterative Stitching
-    # We take the first image as the base panorama, and stitch the next ones to it.
-    panorama = images[0]
+    # 2. Initialization
+    # We start with the first image as the 'center' and try to attach others to it.
+    panorama = images.pop(0)
 
-    for i in range(1, len(images)):
-        print(f"Stitching image {i+1}/{len(images)}...")
-        panorama = stitch_two_images(panorama, images[i])
+    # 3. Iterative Stitching
+    # We keep looping through the remaining list until it's empty or we can't find matches
+    while images:
+        best_match_idx = -1
+        best_match_H = None
+        best_match_score = 0
+        best_side = "none"  # 'left' or 'right'
 
-    # Visualization
-    cv.imshow("Final Panorama", panorama)
-    cv.waitKey(0)
-    cv.destroyAllWindows()
+        # Check every remaining image against the current panorama
+        for i, candidate in enumerate(images):
+
+            # --- Check RIGHT side ---
+            # Try matching candidate (img2) -> panorama (img1)
+            # If H maps candidate to fit inside panorama, it overlaps.
+            # But we want to know relative position.
+            # Usually, we check translation in H.
+
+            count, H, _ = detect_and_match(panorama, candidate)
+
+            if count > THRESHOLD_GOOD_MATCHES:  # Threshold for a "good" match
+                # Check translation component of H (H[0, 2])
+                # If H[0,2] > 0, candidate is to the left (shifted right to match center)
+                # If H[0,2] < 0, candidate is to the right (shifted left to match center)
+                # Wait... homography is tricky.
+                # Let's verify by checking where the center of candidate lands.
+                h_c, w_c = candidate.shape[:2]
+                center_pt = np.array([[[w_c / 2, h_c / 2]]], dtype=np.float32)
+                warped_center = cv.perspectiveTransform(center_pt, H)
+
+                # Center of panorama
+                h_p, w_p = panorama.shape[:2]
+
+                # If warped center x < 0, it belongs on the LEFT.
+                # If warped center x > width, it belongs on the RIGHT.
+                center_x = warped_center[0][0][0]
+
+                side = "right" if center_x > w_p else "left"  # Simplified heuristic
+
+                if count > best_match_score:
+                    best_match_score = count
+                    best_match_idx = i
+                    best_match_H = H
+                    best_side = side
+
+        # 4. Apply Stitch if match found
+        if best_match_idx != -1:
+            print(f"Stitching image {best_match_idx} to the {best_side}...")
+            next_img = images.pop(best_match_idx)
+            panorama = stitch_images(panorama, next_img, best_match_H, best_side)
+        else:
+            print("Warning: Could not match remaining images.")
+            break
 
     # Save the result
-    cv.imwrite("./assets/stitching/panorama_result.jpg", panorama)
+    cv.imwrite("./assets/stitch/panorama_result.jpg", panorama)
     print("Result saved as panorama_result.jpg")
+
+    # Show the result
+    cv.imshow("Result", cv.resize(panorama, None, fx=0.20, fy=0.20))
+    cv.waitKey(0)
+    cv.destroyAllWindows()
 
 
 if __name__ == "__main__":
