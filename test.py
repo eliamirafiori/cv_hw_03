@@ -43,6 +43,76 @@ def detect_and_match(img1, img2):
     return matches_count, H, pts2
 
 
+def stitch_images_blend(base_img, next_img, H):
+    """
+    Stitches next_img onto base_img with seamless Distance Transform blending.
+    """
+    # --- 1. Canvas Calculation (Same as before) ---
+    h1, w1 = base_img.shape[:2]
+    h2, w2 = next_img.shape[:2]
+
+    # Get corners of the next image to calculate the new bounding box
+    corners_next = np.float32([[0, 0], [0, h2], [w2, h2], [w2, 0]]).reshape(-1, 1, 2)
+    warped_corners = cv.perspectiveTransform(corners_next, H)
+
+    # Combine with base image corners
+    all_pts = np.concatenate(
+        ([[0, 0], [0, h1], [w1, h1], [w1, 0]], warped_corners.reshape(-1, 2)), axis=0
+    )
+
+    # Find min/max to determine canvas size
+    [xmin, ymin] = np.int32(all_pts.min(axis=0).ravel() - 0.5)
+    [xmax, ymax] = np.int32(all_pts.max(axis=0).ravel() + 0.5)
+
+    # Translation matrix to shift everything to positive coordinates
+    t = [-xmin, -ymin]
+    Ht = np.array([[1, 0, t[0]], [0, 1, t[1]], [0, 0, 1]])
+
+    # Warp the next image (Img B) onto the large canvas
+    warped_next = cv.warpPerspective(next_img, Ht.dot(H), (xmax - xmin, ymax - ymin))
+
+    # Place the base image (Img A) onto the SAME size canvas
+    canvas_base = np.zeros_like(warped_next)
+    canvas_base[t[1] : h1 + t[1], t[0] : w1 + t[0]] = base_img
+
+    # --- 2. Blending Logic (New) ---
+
+    # A. Create Masks: Where do we have actual pixels vs black background?
+    # We create a binary mask (1 for valid pixel, 0 for empty black)
+    mask_base = cv.cvtColor(canvas_base, cv.COLOR_BGR2GRAY) > 0
+    mask_next = cv.cvtColor(warped_next, cv.COLOR_BGR2GRAY) > 0
+
+    # B. Distance Transform
+    # Calculate distance from the nearest black edge for every pixel.
+    # Pixels in the center of the image get high values; pixels at the seam get low values.
+    dist_base = cv.distanceTransform(mask_base.astype(np.uint8), cv.DIST_L2, 5)
+    dist_next = cv.distanceTransform(mask_next.astype(np.uint8), cv.DIST_L2, 5)
+
+    # C. Calculate Weights
+    # In the overlap region, we want: Final = (ImgA * DistA + ImbB * DistB) / (DistA + DistB)
+    # This automatically creates a linear gradient from one image to the other.
+
+    # Add a tiny value (1e-6) to avoid division by zero errors in the black background
+    total_dist = dist_base + dist_next + 1e-6
+
+    weight_base = dist_base / total_dist
+    weight_next = dist_next / total_dist
+
+    # D. Apply Weights
+    # We blend each channel (B, G, R) separately
+    result = np.zeros_like(warped_next, dtype=np.float32)
+
+    # Expand dimensions of weights to match image shape (H, W, 1) so we can multiply
+    weight_base_3ch = np.dstack([weight_base] * 3)
+    weight_next_3ch = np.dstack([weight_next] * 3)
+
+    result = (canvas_base.astype(float) * weight_base_3ch) + (
+        warped_next.astype(float) * weight_next_3ch
+    )
+
+    return result.astype(np.uint8)
+
+
 def stitch_images(base_img, next_img, H, side="right"):
     """
     Stitches next_img onto base_img using Homography H.
@@ -151,7 +221,8 @@ def main():
         if best_match_idx != -1:
             print(f"Stitching image {best_match_idx} to the {best_side}...")
             next_img = images.pop(best_match_idx)
-            panorama = stitch_images(panorama, next_img, best_match_H, best_side)
+            # panorama = stitch_images(panorama, next_img, best_match_H, best_side)
+            panorama = stitch_images_blend(panorama, next_img, best_match_H)
         else:
             print("Warning: Could not match remaining images.")
             break
