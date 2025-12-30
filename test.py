@@ -44,52 +44,90 @@ def load_images(img_path, logo_path):
 # --- Step 2: Extract Features (Center Circle) ---
 def extract_circle_features(image):
     """
-    Detects the center circle and returns the 4 corners of its bounding box.
-    Returns None if detection fails.
+    Robustly detects the center circle by filtering for size and
+    centrality (distance from image center).
     """
-    # Convert to HLS to easily find white lines (L = Lightness)
+    h, w = image.shape[:2]
+    image_center = np.array([w // 2, h // 2])
+
+    # 1. Pre-processing (White Line Detection)
+    # Convert to HLS to find high Lightness (White)
     hls = cv.cvtColor(image, cv.COLOR_BGR2HLS)
     L = hls[:, :, 1]
 
-    # Threshold for white lines (assuming grass is darker)
-    _, mask = cv.threshold(L, 160, 255, cv.THRESH_BINARY)
+    # Thresholding
+    # We use a high threshold to pick up ONLY the bright white lines
+    _, mask = cv.threshold(L, 140, 255, cv.THRESH_BINARY)
 
-    # Morphological operations to close gaps in the lines
-    kernel = cv.getStructuringElement(cv.MORPH_RECT, (5, 5))
+    # Close gaps (halfway line often splits the circle)
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, (15, 15))
     mask = cv.morphologyEx(mask, cv.MORPH_CLOSE, kernel)
 
-    # Find contours
+    # 2. Find Contours
     cnts, _ = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
     best_box = None
+    min_dist_to_center = float("inf")
+
+    # We define min/max area relative to image size to avoid the outer stadium
+    img_area = h * w
+    min_area = img_area * 0.001  # Circle must be at least 0.5% of image
+    max_area = (
+        img_area * 0.50
+    )  # Circle cannot be bigger than 30% (avoids stadium boundary)
+
+    debug_img = image.copy()  # For visualization
 
     for c in cnts:
-        # Filter noise
-        if cv.contourArea(c) < 500:
+        area = cv.contourArea(c)
+
+        # Filter 1: Size Check
+        if area < min_area or area > max_area:
             continue
+
         if len(c) < 5:
-            continue  # Need 5 points to fit ellipse
+            continue  # Need points for ellipse
 
-        # Fit Ellipse
         try:
+            # Fit Ellipse
             ellipse = cv.fitEllipse(c)
-            # Heuristic: The center circle is usually somewhat round, not a flat line.
             (center, axes, angle) = ellipse
-            major_axis, minor_axis = max(axes), min(axes)
 
-            # If the aspect ratio is too extreme, it's likely a side line, not the circle
-            if minor_axis / major_axis > 0.1:
-                # Get the 4 corners of the bounding rect of this ellipse
+            # Filter 2: Aspect Ratio Check
+            # A circle in perspective looks like a squashed ellipse,
+            # but usually not a super thin line.
+            major, minor = max(axes), min(axes)
+            if minor / major < 0.15:  # If it's too thin, it's a line, not a circle
+                continue
+
+            # Filter 3: Centrality Check
+            # We assume the "Center Circle" is roughly near the middle of the view
+            dist_to_center = np.linalg.norm(np.array(center) - image_center)
+
+            # We want the candidate that is closest to the center
+            # AND passes our size checks.
+            if dist_to_center < min_dist_to_center:
+                min_dist_to_center = dist_to_center
                 best_box = cv.boxPoints(ellipse)
-                # We assume the largest valid ellipse found is the center circle
-                # (In a real app, you might want more robust filtering)
-                break
-        except:
+
+                # Draw accepted candidates in Green
+                cv.drawContours(debug_img, [np.int32(best_box)], -1, (0, 255, 0), 2)
+            else:
+                # Draw rejected candidates in Red
+                rejected_box = cv.boxPoints(ellipse)
+                cv.drawContours(debug_img, [np.int32(rejected_box)], -1, (0, 0, 255), 1)
+
+        except Exception as e:
             continue
+
+    # Show the debug image so you know what happened
+    cv.imshow("Debug: Green=Selected, Red=Rejected", debug_img)
+    # cv.waitKey(0) # Uncomment if you want to pause here
 
     if best_box is not None:
         return order_points(best_box)
     else:
+        print("No valid center circle found. Try adjusting min/max_area.")
         return None
 
 
