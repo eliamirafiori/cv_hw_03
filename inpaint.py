@@ -135,8 +135,8 @@ def order_points(pts):
 
 def main():
     # Input Handling (as per exercise description)
-    image_path = "./pitch.jpg"
-    logo_path = "./logo_transparent.png"
+    image_path = "./assets/inpaint/pitch.jpg"
+    logo_path = "./assets/inpaint/logo_transparent.png"
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
 

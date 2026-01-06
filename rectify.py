@@ -57,7 +57,9 @@ def main():
     # Mathematically: This is a Convolution operation.
     # A small matrix (kernel) slides over the image.
     # The kernel values follow a 2D Gaussian distribution (a bell curve).
-    blur = cv.GaussianBlur(gray, (5, 5), 0) # The size must be an odd number to find the center
+    blur = cv.GaussianBlur(
+        gray, (5, 5), 0
+    )  # The size must be an odd number to find the center
     cv.imshow("Gaussian Blur", cv.resize(blur, None, fx=0.30, fy=0.30))
     cv.waitKey(0)
     cv.destroyAllWindows()
