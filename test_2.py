@@ -109,7 +109,7 @@ def main():
         (center, axes, angle) = ellipse
         major_axis = max(axes)
         minor_axis = min(axes)
-        if minor_axis > 0 and (major_axis / minor_axis) < 2.0:
+        if minor_axis > 0 and 3 <= (major_axis / minor_axis) <= 3.5:
             # 4. Draw the ellipse
             # Note: 'ellipse' is a RotatedRect, which cv.ellipse accepts directly
             cv.ellipse(ellipse_image, ellipse, (0, 255, 0), 2)
