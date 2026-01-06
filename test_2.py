@@ -46,10 +46,11 @@ def main():
 
     # Algorithms like Canny Edge Detection operate on intensity changes (light to dark),
     # so color information is treated as unnecessary noise.
-    gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-    cv.imshow("Gray Scale", cv.resize(gray, None, fx=0.30, fy=0.30))
-    cv.waitKey(0)
-    cv.destroyAllWindows()
+    # gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
+    # cv.imshow("Gray Scale", cv.resize(gray, None, fx=0.30, fy=0.30))
+    # cv.waitKey(0)
+    # cv.destroyAllWindows()
+    gray = image
 
     # Technically: This smooths the image to remove "high-frequency noise".
     # If you don't blur, a single speck of dust or digital grain could be mistaken for an edge.
@@ -64,9 +65,39 @@ def main():
     cv.waitKey(0)
     cv.destroyAllWindows()
 
+    ##################################
+
+    # 1. Convert to HSV
+    hsv = cv.cvtColor(blur, cv.COLOR_BGR2HSV)
+
+    # 2. Define Green Range
+    # These values usually cover most grass under standard lighting
+    lower_green = np.array([35, 40, 40])
+    upper_green = np.array([85, 255, 255])
+
+    # 3. Create the mask
+    mask = cv.inRange(hsv, lower_green, upper_green)
+
+    # 4. Clean up the mask (Optional but recommended)
+    # Removes small holes (players) and noise
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv.morphologyEx(mask, cv.MORPH_OPEN, kernel)
+
+    # Algorithms like Canny Edge Detection operate on intensity changes (light to dark),
+    # so color information is treated as unnecessary noise.
+    gray = cv.cvtColor(blur, cv.COLOR_BGR2GRAY)
+    cv.imshow("Gray Scale", cv.resize(gray, None, fx=0.30, fy=0.30))
+    cv.waitKey(0)
+    cv.destroyAllWindows()
+
+    blur = gray
+
+    ##################################
+
     # Technically: The Canny algorithm is a multi-stage edge detector.
     # It finds pixels where the intensity changes most drastically (gradients).
     edged = cv.Canny(blur, 75, 200)
+    edged = cv.bitwise_and(edged, edged, mask=mask)
     cv.imshow("Edged (Canny)", cv.resize(edged, None, fx=0.30, fy=0.30))
     cv.waitKey(0)
     cv.destroyAllWindows()
@@ -95,6 +126,9 @@ def main():
     # Create a copy to draw ellipses on
     ellipse_image = original.copy()
 
+    biggest_ellipse = None
+    max_area = 0
+
     puzzle_contour = None
 
     # Loop over the contours to find the 4-sided polygon (the sudoku grid)
@@ -110,9 +144,14 @@ def main():
         major_axis = max(axes)
         minor_axis = min(axes)
         if minor_axis > 0 and 3 <= (major_axis / minor_axis) <= 3.5:
+            area = np.pi * (major_axis / 2) * (minor_axis / 2)
+            if area > max_area:
+                max_area = area
+                biggest_ellipse = ellipse
+
             # 4. Draw the ellipse
             # Note: 'ellipse' is a RotatedRect, which cv.ellipse accepts directly
-            cv.ellipse(ellipse_image, ellipse, (0, 255, 0), 2)
+            # cv.ellipse(ellipse_image, ellipse, (0, 255, 0), 2)
 
         continue
 
@@ -132,6 +171,7 @@ def main():
             puzzle_contour = approx
             break
 
+    cv.ellipse(ellipse_image, biggest_ellipse, (0, 0, 255), 2)
     cv.imshow("Ellipses Detected", cv.resize(ellipse_image, None, fx=0.5, fy=0.5))
     cv.waitKey(0)
     cv.destroyAllWindows()
