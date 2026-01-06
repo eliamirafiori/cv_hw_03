@@ -192,20 +192,8 @@ def main():
     debug_show("Edged (Canny)", edged)
 
     # Find contours
-    # Technically: This function analyzes the binary image (black and white edges) to find connected curves.
+    # This function analyzes the binary image (black and white edges) to find connected curves.
     # It walks along the boundary of white pixels to separate "objects" from the black background
-    #
-    # Mathematically (Topological Analysis): The algorithm (based on Suzuki & Abe, 1985) scans the image rows.
-    # When it transitions from black (0) to white (1), it marks a "border".
-    # It then follows this border until it returns to the start point.
-    # - cv.RETR_LIST: It finds every single contour in the image,
-    # whether it is an external boundary (like the soccer pitch)
-    # or an internal hole (like the logo, a player, or the center circle).
-    #
-    # - cv.CHAIN_APPROX_NONE: This compresses the contour data.
-    # A vertical line of 100 pixels normally requires 100 coordinate pairs (x, y).
-    # This flag reduces it to just the endpoints (2 coordinates), discarding the redundant points in between.
-    # This saves memory and speeds up later calculations.
     cnts, _ = cv.findContours(edged.copy(), cv.RETR_LIST, cv.CHAIN_APPROX_NONE)
 
     # Technically: This sorts the list of detected shapes from largest to smallest and keeps only the top 5
