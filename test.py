@@ -13,6 +13,8 @@ def debug_show(name, img):
         return
     resized = cv.resize(img, None, fx=0.5, fy=0.5)
     cv.imshow(name, resized)
+    cv.waitKey(0)
+    cv.destroyAllWindows()
 
 
 # --------------------------------------------------

@@ -29,7 +29,7 @@ def order_points(pts):
 
 def main():
     # Input Handling (as per exercise description)
-    image_path = "./assets/rectify/sudoku.jpg"
+    image_path = "./pitch.jpg"
     if len(sys.argv) > 1:
         image_path = sys.argv[1]
 
@@ -57,7 +57,9 @@ def main():
     # Mathematically: This is a Convolution operation.
     # A small matrix (kernel) slides over the image.
     # The kernel values follow a 2D Gaussian distribution (a bell curve).
-    blur = cv.GaussianBlur(gray, (5, 5), 0) # The size must be an odd number to find the center
+    blur = cv.GaussianBlur(
+        gray, (5, 5), 0
+    )  # The size must be an odd number to find the center
     cv.imshow("Gaussian Blur", cv.resize(blur, None, fx=0.30, fy=0.30))
     cv.waitKey(0)
     cv.destroyAllWindows()
@@ -84,16 +86,36 @@ def main():
     # A vertical line of 100 pixels normally requires 100 coordinate pairs (x, y).
     # This flag reduces it to just the endpoints (2 coordinates), discarding the redundant points in between.
     # This saves memory and speeds up later calculations.
-    cnts, _ = cv.findContours(edged.copy(), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
+    cnts, _ = cv.findContours(edged.copy(), cv.RETR_LIST, cv.CHAIN_APPROX_NONE)
 
     # Technically: This sorts the list of detected shapes from largest to smallest and keeps only the top 5
     # Mathematically: It calculates the Green's Theorem area for a polygon
-    cnts = sorted(cnts, key=cv.contourArea, reverse=True)[:5]  # Sort by largest area
+    cnts = sorted(cnts, key=cv.contourArea, reverse=True)  # Sort by largest area
+
+    # Create a copy to draw ellipses on
+    ellipse_image = original.copy()
 
     puzzle_contour = None
 
     # Loop over the contours to find the 4-sided polygon (the sudoku grid)
     for c in cnts:
+        if len(c) < 5:
+            print("Could not find enough contours.")
+            continue
+
+        ellipse = cv.fitEllipse(c)
+
+        # 3. Optional: Filter by area or aspect ratio to ignore noise
+        (center, axes, angle) = ellipse
+        major_axis = max(axes)
+        minor_axis = min(axes)
+        if minor_axis > 0 and (major_axis / minor_axis) < 2.0:
+            # 4. Draw the ellipse
+            # Note: 'ellipse' is a RotatedRect, which cv.ellipse accepts directly
+            cv.ellipse(ellipse_image, ellipse, (0, 255, 0), 2)
+
+        continue
+
         # Technically: This calculates the total length of the contour boundary
         #
         # Mathematically: It sums the Euclidean distances between consecutive points in the contour.
@@ -109,6 +131,10 @@ def main():
         if len(approx) == 4:
             puzzle_contour = approx
             break
+
+    cv.imshow("Ellipses Detected", cv.resize(ellipse_image, None, fx=0.5, fy=0.5))
+    cv.waitKey(0)
+    cv.destroyAllWindows()
 
     if puzzle_contour is None:
         print("Could not find the Sudoku grid corners.")
