@@ -14,12 +14,12 @@ def debug_show(name, img):
 
 
 def insert_logo_alpha_roi(original_img, logo_img, box_pts):
-    # 1. Ensure logo has an alpha channel (BGRA)
+    # Ensure logo has an alpha channel (BGRA)
     if logo_img.shape[2] != 4:
         print("Error: Logo does not have an alpha channel.")
         return original_img
 
-    # 2. Get the axis-aligned bounding box for the ROI
+    # Get the axis-aligned bounding box for the ROI
     x, y, w, h = cv.boundingRect(box_pts.astype(np.int32))
     img_h, img_w = original_img.shape[:2]
     x_start, y_start = max(0, x), max(0, y)
@@ -29,10 +29,10 @@ def insert_logo_alpha_roi(original_img, logo_img, box_pts):
     roi_pitch = original_img[y_start:y_end, x_start:x_end].copy().astype(float)
     actual_h, actual_w = roi_pitch.shape[:2]
 
-    # 3. Adjust target points to the ROI coordinate system
+    # Adjust target points to the ROI coordinate system
     dst_pts_roi = box_pts - [x_start, y_start]
 
-    # 4. Warp the logo (including alpha channel)
+    # Warp the logo (including alpha channel)
     lh, lw = logo_img.shape[:2]
     src_pts = np.float32([[0, 0], [lw - 1, 0], [lw - 1, lh - 1], [0, lh - 1]])
     H = cv.getPerspectiveTransform(src_pts, dst_pts_roi.astype(np.float32))
@@ -42,20 +42,19 @@ def insert_logo_alpha_roi(original_img, logo_img, box_pts):
         float
     )
 
-    # 5. Extract RGB and Alpha from the warped result
+    # Extract RGB and Alpha from the warped result
     logo_rgb = warped_logo_roi[:, :, :3]
     # Normalize alpha to 0.0 - 1.0.
-    # Optional: Multiply by 0.7 if you want the logo itself to be semi-transparent
     logo_alpha = (warped_logo_roi[:, :, 3] / 255.0) * 0.8
 
-    # 6. Manual Alpha Blending
+    # Manual Alpha Blending
     # Formula: Out = (Foreground * Alpha) + (Background * (1 - Alpha))
     # We use [:, :, None] to allow the 2D alpha map to multiply the 3D RGB image
     blended_roi = logo_rgb * logo_alpha[:, :, None] + roi_pitch * (
         1.0 - logo_alpha[:, :, None]
     )
 
-    # 7. Recompose
+    # Recompose
     result = original_img.copy()
     result[y_start:y_end, x_start:x_end] = blended_roi.astype(np.uint8)
 
@@ -66,44 +65,43 @@ def insert_logo_roi(original_img, logo_img, box_pts):
     if logo_img.shape[2] == 4:
         return insert_logo_alpha_roi(original_img, logo_img, box_pts)
 
-    # 1. Get the axis-aligned bounding box for the ROI
+    # Get the axis-aligned bounding box for the ROI
     # This lets us crop a small square area from the pitch
     x, y, w, h = cv.boundingRect(box_pts.astype(np.int32))
 
-    # Safety check: ensure coordinates are within image boundaries
+    # Ensure coordinates are within image boundaries
     x, y = max(0, x), max(0, y)
     roi_pitch = original_img[y : y + h, x : x + w].copy()
 
     debug_show("ROI PITCH", roi_pitch)
 
-    # 2. Adjust target points to the ROI coordinate system
+    # Adjust target points to the ROI coordinate system
     # Since we cropped the image, we must subtract (x, y) from the points
     dst_pts_roi = box_pts - [x, y]
 
-    # 3. Define Logo Source Points
+    # Define Logo Source Points
     lh, lw = logo_img.shape[:2]
     src_pts = np.float32([[0, 0], [lw - 1, 0], [lw - 1, lh - 1], [0, lh - 1]])
 
-    # 4. Warp the logo to the ROI size
+    # Warp the logo to the ROI size
     H = cv.getPerspectiveTransform(src_pts, dst_pts_roi.astype(np.float32))
     warped_logo_roi = cv.warpPerspective(logo_img, H, (w, h))
 
     debug_show("WARPED LOGO ROI", warped_logo_roi)
 
-    # 5. Create a mask of the logo within the ROI
+    # Create a mask of the logo within the ROI
     mask = np.zeros((h, w), dtype=np.uint8)
     cv.fillConvexPoly(mask, dst_pts_roi.astype(np.int32), 255)
 
-    # 6. Blend only the ROI
-    # We use a 50/50 blend here, but you can change 0.5 to your liking
+    # Blend only the ROI
     blended_roi = cv.addWeighted(roi_pitch, 0.5, warped_logo_roi, 0.5, 0)
 
-    # 7. Use the mask to place the blend ONLY inside the parallelogram
+    # Use the mask to place the blend ONLY inside the parallelogram
     # Outside the parallelogram, we keep the original roi_pitch pixels
     mask_bool = mask == 255
     roi_pitch[mask_bool] = blended_roi[mask_bool]
 
-    # 8. Put the processed ROI back into the full original image
+    # Put the processed ROI back into the full original image
     result = original_img.copy()
     result[y : y + h, x : x + w] = roi_pitch
 
@@ -134,7 +132,8 @@ def order_points(pts):
 
 
 def main():
-    # Input Handling (as per exercise description)
+    ### Input Handling ###
+
     image_path = "./assets/inpaint/pitch.jpg"
     logo_path = "./assets/inpaint/logo_transparent.png"
     if len(sys.argv) > 1:
@@ -149,14 +148,12 @@ def main():
     original = image.copy()
     logo = cv.imread(logo_path, cv.IMREAD_UNCHANGED)
 
-    ### Feature Detection ###
+    ### Gaussian Blur ###
 
-    # We use Canny edge detection + Contours to find the edges
-
-    # Technically: This smooths the image to remove "high-frequency noise".
+    # This smooths the image to remove "high-frequency noise".
     # If you don't blur, a single speck of dust or digital grain could be mistaken for an edge.
     #
-    # Mathematically: This is a Convolution operation.
+    # This is a Convolution operation.
     # A small matrix (kernel) slides over the image.
     # The kernel values follow a 2D Gaussian distribution (a bell curve).
     blur = cv.GaussianBlur(
@@ -164,40 +161,47 @@ def main():
     )  # The size must be an odd number to find the center
     debug_show("Gaussian Blur", blur)
 
-    # 1. Convert to HSV
+    ### Green Filter ###
+
+    # Convert to HSV
     hsv = cv.cvtColor(blur, cv.COLOR_BGR2HSV)
 
-    # 2. Define Green Range
+    # Define Green Range
     # These values usually cover most grass under standard lighting
     lower_green = np.array([35, 40, 40])
     upper_green = np.array([85, 255, 255])
 
-    # 3. Create the mask
+    # Create the mask
     mask = cv.inRange(hsv, lower_green, upper_green)
 
-    # 4. Clean up the mask (Optional but recommended)
-    # Removes small holes (players) and noise
+    # Clean up the mask
+    # Removes noises
     kernel = np.ones((5, 5), np.uint8)
     mask = cv.morphologyEx(mask, cv.MORPH_OPEN, kernel)
+
+    ### Gray Filter ###
 
     # Algorithms like Canny Edge Detection operate on intensity changes (light to dark),
     # so color information is treated as unnecessary noise.
     gray = cv.cvtColor(blur, cv.COLOR_BGR2GRAY)
     debug_show("Gray Scale", gray)
 
-    # Technically: The Canny algorithm is a multi-stage edge detector.
+    ### Edge Detection ###
+
+    # The Canny algorithm is a multi-stage edge detector.
     # It finds pixels where the intensity changes most drastically (gradients).
     edged = cv.Canny(gray, 75, 200)
     edged = cv.bitwise_and(edged, edged, mask=mask)
     debug_show("Edged (Canny)", edged)
 
-    # Find contours
+    ### Find contours ###
+
     # This function analyzes the binary image (black and white edges) to find connected curves.
     # It walks along the boundary of white pixels to separate "objects" from the black background
     cnts, _ = cv.findContours(edged.copy(), cv.RETR_LIST, cv.CHAIN_APPROX_NONE)
 
-    # Technically: This sorts the list of detected shapes from largest to smallest and keeps only the top 5
-    # Mathematically: It calculates the Green's Theorem area for a polygon
+    # This sorts the list of detected shapes from largest to smallest and keeps only the top 5
+    # It calculates the Green's Theorem area for a polygon
     cnts = sorted(cnts, key=cv.contourArea, reverse=True)  # Sort by largest area
 
     # Create a copy to draw ellipses on
@@ -215,7 +219,7 @@ def main():
 
         ellipse = cv.fitEllipse(c)
 
-        # 3. Optional: Filter by area or aspect ratio to ignore noise
+        # Filter by area or aspect ratio to ignore noise
         (center, axes, angle) = ellipse
         major_axis = max(axes)
         minor_axis = min(axes)

@@ -42,6 +42,7 @@ def main():
     original = image.copy()
 
     ### Feature Detection ###
+
     # We use Canny edge detection + Contours to find the grid
 
     # Algorithms like Canny Edge Detection operate on intensity changes (light to dark),
@@ -51,10 +52,10 @@ def main():
     cv.waitKey(0)
     cv.destroyAllWindows()
 
-    # Technically: This smooths the image to remove "high-frequency noise".
+    # This smooths the image to remove "high-frequency noise".
     # If you don't blur, a single speck of dust or digital grain could be mistaken for an edge.
     #
-    # Mathematically: This is a Convolution operation.
+    # This is a Convolution operation.
     # A small matrix (kernel) slides over the image.
     # The kernel values follow a 2D Gaussian distribution (a bell curve).
     blur = cv.GaussianBlur(
@@ -64,7 +65,7 @@ def main():
     cv.waitKey(0)
     cv.destroyAllWindows()
 
-    # Technically: The Canny algorithm is a multi-stage edge detector.
+    # The Canny algorithm is a multi-stage edge detector.
     # It finds pixels where the intensity changes most drastically (gradients).
     edged = cv.Canny(blur, 75, 200)
     cv.imshow("Edged (Canny)", cv.resize(edged, None, fx=0.30, fy=0.30))
@@ -72,10 +73,10 @@ def main():
     cv.destroyAllWindows()
 
     # Find contours
-    # Technically: This function analyzes the binary image (black and white edges) to find connected curves.
+    # This function analyzes the binary image (black and white edges) to find connected curves.
     # It walks along the boundary of white pixels to separate "objects" from the black background
     #
-    # Mathematically (Topological Analysis): The algorithm (based on Suzuki & Abe, 1985) scans the image rows.
+    # The algorithm (based on Suzuki & Abe, 1985) scans the image rows.
     # When it transitions from black (0) to white (1), it marks a "border".
     # It then follows this border until it returns to the start point.
     # - cv.RETR_EXTERNAL: This flag tells the algorithm to only retrieve the outermost contours.
@@ -88,22 +89,22 @@ def main():
     # This saves memory and speeds up later calculations.
     cnts, _ = cv.findContours(edged.copy(), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_NONE)
 
-    # Technically: This sorts the list of detected shapes from largest to smallest and keeps only the top 5
-    # Mathematically: It calculates the Green's Theorem area for a polygon
+    # This sorts the list of detected shapes from largest to smallest and keeps only the top 5
+    # It calculates the Green's Theorem area for a polygon
     cnts = sorted(cnts, key=cv.contourArea, reverse=True)[:5]  # Sort by largest area
 
     puzzle_contour = None
 
     # Loop over the contours to find the 4-sided polygon (the sudoku grid)
     for c in cnts:
-        # Technically: This calculates the total length of the contour boundary
+        # This calculates the total length of the contour boundary
         #
-        # Mathematically: It sums the Euclidean distances between consecutive points in the contour.
+        # It sums the Euclidean distances between consecutive points in the contour.
         # If the contour is closed (the True flag), it includes the distance from the last point back to the first
         peri = cv.arcLength(c, True)
 
         # Approximate the contour to a polygon
-        # Technically: This simplifies a jagged, noisy contour into a cleaner geometric shape with fewer vertices.
+        # This simplifies a jagged, noisy contour into a cleaner geometric shape with fewer vertices.
         # It asks: "Can I represent this complex shape with a simpler polygon that doesn't deviate more than ϵ from the original?"
         approx = cv.approxPolyDP(c, 0.02 * peri, True)
 
@@ -138,10 +139,10 @@ def main():
     ### Homography Computation ###
 
     # This maps the source points (tilted) to the destination points (flat)
-    # Technically: This function calculates the 3×3 transformation matrix
+    # This function calculates the 3×3 transformation matrix
     # needed to map the 4 corners of the detected polygon to the 4 corners of the flattened square.
     #
-    # Mathematically (Solving a Linear System): A homography matrix has 9 elements,
+    # A homography matrix has 9 elements,
     # but because it is scale-invariant (multiplying the whole matrix by 5 doesn't change the transformation),
     # we fix the last element (h33​) to 1. This leaves 8 unknowns (degrees of freedom).
     # To solve for 8 unknowns, we need 8 equations.
@@ -151,14 +152,15 @@ def main():
 
     ### Warping ###
 
-    # Technically: This function takes the original image and the matrix H and renders the new image
+    # This function takes the original image and the matrix H and renders the new image
     #
-    # Mathematically (Backward Mapping & Interpolation):
+    # (Backward Mapping & Interpolation):
     # You might think the computer takes a pixel from the Source and moves it to the Destination.
     # It actually does the opposite. This is called "Inverse Mapping".
     warped = cv.warpPerspective(original, H, (width, height))
 
-    # Show results
+    ### Show results ###
+
     cv.imshow("Original with Corners", cv.resize(image, None, fx=0.30, fy=0.30))
     cv.waitKey(0)
     cv.destroyAllWindows()

@@ -47,7 +47,7 @@ def stitch_images_blend(base_img, next_img, H):
     """
     Stitches next_img onto base_img with seamless Distance Transform blending.
     """
-    # --- 1. Canvas Calculation (Same as before) ---
+    # Canvas Calculation
     h1, w1 = base_img.shape[:2]
     h2, w2 = next_img.shape[:2]
 
@@ -75,20 +75,20 @@ def stitch_images_blend(base_img, next_img, H):
     canvas_base = np.zeros_like(warped_next)
     canvas_base[t[1] : h1 + t[1], t[0] : w1 + t[0]] = base_img
 
-    # --- 2. Blending Logic (New) ---
+    # ### Blending Logic ###
 
-    # A. Create Masks: Where do we have actual pixels vs black background?
+    # Create Masks: Where do we have actual pixels vs black background?
     # We create a binary mask (1 for valid pixel, 0 for empty black)
     mask_base = cv.cvtColor(canvas_base, cv.COLOR_BGR2GRAY) > 0
     mask_next = cv.cvtColor(warped_next, cv.COLOR_BGR2GRAY) > 0
 
-    # B. Distance Transform
+    # Distance Transform
     # Calculate distance from the nearest black edge for every pixel.
     # Pixels in the center of the image get high values; pixels at the seam get low values.
     dist_base = cv.distanceTransform(mask_base.astype(np.uint8), cv.DIST_L2, 5)
     dist_next = cv.distanceTransform(mask_next.astype(np.uint8), cv.DIST_L2, 5)
 
-    # C. Calculate Weights
+    # Calculate Weights
     # In the overlap region, we want: Final = (ImgA * DistA + ImbB * DistB) / (DistA + DistB)
     # This automatically creates a linear gradient from one image to the other.
 
@@ -98,7 +98,7 @@ def stitch_images_blend(base_img, next_img, H):
     weight_base = dist_base / total_dist
     weight_next = dist_next / total_dist
 
-    # D. Apply Weights
+    # Apply Weights
     # We blend each channel (B, G, R) separately
     result = np.zeros_like(warped_next, dtype=np.float32)
 
@@ -151,7 +151,8 @@ def stitch_images(base_img, next_img, H, side="right"):
 
 
 def main():
-    # 1. Load Images
+    ### Load Images ###
+
     image_paths = sys.argv[1:]
     if not image_paths:
         print("Usage: python stitch.py img1.jpg img2.jpg ...")
@@ -169,11 +170,11 @@ def main():
 
     print(f"Loaded {len(images)} images. Analyzing order...")
 
-    # 2. Initialization
     # We start with the first image as the 'center' and try to attach others to it.
     panorama = images.pop(0)
 
-    # 3. Iterative Stitching
+    ### Iterative Stitching ###
+
     # We keep looping through the remaining list until it's empty or we can't find matches
     while images:
         best_match_idx = -1
@@ -183,8 +184,7 @@ def main():
 
         # Check every remaining image against the current panorama
         for i, candidate in enumerate(images):
-
-            # --- Check RIGHT side ---
+            # Check RIGHT side
             # Try matching candidate (img2) -> panorama (img1)
             # If H maps candidate to fit inside panorama, it overlaps.
             # But we want to know relative position.
@@ -196,7 +196,6 @@ def main():
                 # Check translation component of H (H[0, 2])
                 # If H[0,2] > 0, candidate is to the left (shifted right to match center)
                 # If H[0,2] < 0, candidate is to the right (shifted left to match center)
-                # Wait... homography is tricky.
                 # Let's verify by checking where the center of candidate lands.
                 h_c, w_c = candidate.shape[:2]
                 center_pt = np.array([[[w_c / 2, h_c / 2]]], dtype=np.float32)
@@ -209,7 +208,7 @@ def main():
                 # If warped center x > width, it belongs on the RIGHT.
                 center_x = warped_center[0][0][0]
 
-                side = "right" if center_x > w_p else "left"  # Simplified heuristic
+                side = "right" if center_x > w_p else "left"
 
                 if count > best_match_score:
                     best_match_score = count
@@ -217,7 +216,7 @@ def main():
                     best_match_H = H
                     best_side = side
 
-        # 4. Apply Stitch if match found
+        # Apply Stitch if match found
         if best_match_idx != -1:
             print(f"Stitching image {best_match_idx} to the {best_side}...")
             next_img = images.pop(best_match_idx)
@@ -227,11 +226,13 @@ def main():
             print("Warning: Could not match remaining images.")
             break
 
-    # Save the result
+    ### Save the result ###
+
     cv.imwrite("./assets/stitch/panorama_result.jpg", panorama)
     print("Result saved as panorama_result.jpg")
 
-    # Show the result
+    ### Show the result ###
+
     cv.imshow("Result", cv.resize(panorama, None, fx=0.20, fy=0.20))
     cv.waitKey(0)
     cv.destroyAllWindows()
